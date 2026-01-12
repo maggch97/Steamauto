@@ -1,12 +1,14 @@
 import datetime
 import random
 import time
+from decimal import Decimal
 
 import schedule
 
 import uuyoupinapi
 from utils.logger import PluginLogger, handle_caught_exception, logger
 from utils.notifier import send_notification
+from utils.price_api import PriceAPI
 from utils.tools import exit_code
 from utils.uu_helper import get_valid_token_for_uu
 
@@ -23,6 +25,7 @@ class UUAutoSellItem:
         self.buy_price_cache = {}
         self.sale_inventory_list = None
         self.steam_client = steam_client
+        self.price_api = None
 
     def init(self) -> bool:
         return False
@@ -173,6 +176,13 @@ class UUAutoSellItem:
 
                 self.inventory_list = self.uuyoupin.get_inventory(refresh=True)
 
+                use_price_api = bool(self.config.get("uu_auto_sell_item", {}).get("use_price_api_by_wear", False))
+                if use_price_api and self.price_api is None:
+                    base_url = self.config.get("uu_auto_sell_item", {}).get("price_api_base_url", "http://127.0.0.1:8080")
+                    retries = int(self.config.get("uu_auto_sell_item", {}).get("price_api_retries", 3))
+                    timeout_seconds = float(self.config.get("uu_auto_sell_item", {}).get("price_api_timeout_seconds", 8.0))
+                    self.price_api = PriceAPI(base_url=base_url, retries=retries, timeout_seconds=timeout_seconds)
+
                 for i, item in enumerate(self.inventory_list):
                     if item["AssetInfo"] is None:
                         continue
@@ -195,12 +205,36 @@ class UUAutoSellItem:
                             self.logger.info(f"物品 {short_name} 命中黑名单，将不会上架")
                             continue
 
-                    try:
-                        sale_price = self.get_market_sale_price(item_id, good_name=short_name)
-                    except Exception as e:
-                        handle_caught_exception(e, "UUAutoSellItem", known=True)
-                        logger.error(f"获取 {short_name} 的市场价格失败: {e}，暂时跳过")
-                        continue
+                    if use_price_api:
+                        asset_info = item.get("AssetInfo") if isinstance(item, dict) else None
+                        abrade = None
+                        if isinstance(asset_info, dict):
+                            abrade = asset_info.get("Abrade")
+                        if abrade is None or abrade == "":
+                            self.logger.error(f"跳过上架：{short_name} 缺少 AssetInfo.Abrade")
+                            continue
+                        try:
+                            wear = Decimal(str(abrade))
+                        except Exception:
+                            self.logger.error(f"跳过上架：{short_name} AssetInfo.Abrade 格式无效: {abrade}")
+                            continue
+                        try:
+                            sale_price = self.price_api.query_cheapest_price_youpin_by_wear_bucket(item_id, wear)  # type: ignore
+                        except Exception as e:
+                            handle_caught_exception(e, "UUAutoSellItem-PriceAPI", known=True)
+                            self.logger.error(f"跳过上架：{short_name} 磨损定价接口调用失败: {e}")
+                            continue
+                        if sale_price is None or sale_price == 0:
+                            self.logger.error(f"跳过上架：{short_name} 未获取到磨损区间最低价")
+                            continue
+                        self.logger.info(f"磨损定价：{short_name} wear={wear} price={sale_price:.2f}")
+                    else:
+                        try:
+                            sale_price = self.get_market_sale_price(item_id, good_name=short_name)
+                        except Exception as e:
+                            handle_caught_exception(e, "UUAutoSellItem", known=True)
+                            logger.error(f"获取 {short_name} 的市场价格失败: {e}，暂时跳过")
+                            continue
 
                     if self.config["uu_auto_sell_item"]["take_profile"]:
                         self.logger.info(f"按{self.config['uu_auto_sell_item']['take_profile_ratio']:.2f}止盈率设置价格")
