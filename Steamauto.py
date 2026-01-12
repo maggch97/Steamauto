@@ -9,6 +9,7 @@ import signal
 import sys
 import threading
 import time
+from types import SimpleNamespace
 from typing import no_type_check
 
 import json5
@@ -309,15 +310,38 @@ def main():
         pause()
         return 0
 
-    steam_client = None
-    steam_client = SteamClient("")
-    steam_client = login_to_steam(config)
-    if steam_client is None:
-        send_notification(steam_client, "登录Steam失败，程序停止运行")
-        pause()
-        return 1
-    # 仅用于获取启用的插件
+    # 先加载插件并判断是否需要登录 Steam（避免仅运行UU插件时被 Steam 2FA 配置阻塞）
     import_all_plugins()
+    enabled_plugin_keys: list[str] = []
+    for plugin_key in get_plugin_classes().keys():
+        if (plugin_key in config and config[plugin_key].get("enable")) or ((plugin_key not in config) and (plugin_key not in INTERNAL_PLUGINS)):
+            enabled_plugin_keys.append(plugin_key)
+
+    uu_only_plugins = {"uu_auto_sell_item", "uu_auto_lease_item"}
+    steam_login_required = len(enabled_plugin_keys) > 0 and not set(enabled_plugin_keys).issubset(uu_only_plugins)
+
+    steam_logged_in = False
+    if steam_login_required:
+        steam_client = login_to_steam(config)
+        if steam_client is None:
+            send_notification(steam_client, "登录Steam失败，程序停止运行")
+            pause()
+            return 1
+        steam_logged_in = True
+    else:
+        # 仅启用UU上架相关插件时，不强制登录Steam。仍提供 username 供UU token 缓存文件命名。
+        steam_username = ""
+        try:
+            with open(STEAM_ACCOUNT_INFO_FILE_PATH, "r", encoding=get_encoding(STEAM_ACCOUNT_INFO_FILE_PATH)) as f:
+                steam_account_info = json5.loads(f.read())
+                if isinstance(steam_account_info, dict):
+                    steam_username = steam_account_info.get("steam_username", "") or ""
+        except Exception:
+            steam_username = ""
+        steam_client = SimpleNamespace(username=steam_username)
+        if steam_client_mutex.get(steam_username) is None:
+            steam_client_mutex[steam_username] = threading.Lock()
+
     plugins_enabled = get_plugins_enabled(steam_client, steam_client_mutex.get(steam_client.username))
     # 检查插件是否正确初始化
     plugins_check_status = plugins_check(plugins_enabled)
@@ -327,7 +351,10 @@ def main():
         return 1
 
     if steam_client is not None:
-        send_notification(steam_client, "Steamauto 已经成功登录Steam并开始运行")
+        if steam_logged_in:
+            send_notification(steam_client, "Steamauto 已经成功登录Steam并开始运行")
+        else:
+            send_notification(steam_client, "Steamauto 已开始运行（已跳过Steam登录）")
         init_plugins_and_start(plugins_enabled)
 
     logger.info("由于所有插件已经关闭,程序即将退出...")
