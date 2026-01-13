@@ -330,23 +330,19 @@ class UUAutoSellItem:
                         continue
 
                 if use_price_api:
-                    asset_info = item.get("assetInfo") if isinstance(item, dict) else None
-                    if asset_info is None:
-                        asset_info = item.get("AssetInfo") if isinstance(item, dict) else None
-
                     abrade = None
-                    if isinstance(asset_info, dict):
-                        abrade = asset_info.get("Abrade")
-                        if abrade is None:
-                            abrade = asset_info.get("abrade")
+                    if isinstance(item, dict):
+                        # 严格模式：在售列表只认顶层 abrade
+                        abrade = item.get("abrade")
+
                     if abrade is None or abrade == "":
-                        self.logger.error(f"改价跳过：{short_name} 缺少 AssetInfo.Abrade")
+                        self.logger.error(f"改价跳过：{short_name} 缺少顶层 abrade 字段")
                         continue
 
                     try:
                         wear = Decimal(str(abrade))
                     except Exception:
-                        self.logger.error(f"改价跳过：{short_name} AssetInfo.Abrade 格式无效: {abrade}")
+                        self.logger.error(f"改价跳过：{short_name} abrade 格式无效: {abrade}")
                         continue
 
                     try:
